@@ -6,32 +6,45 @@ use clap::{Parser, Subcommand};
 use console::Style;
 use dialoguer::{Confirm, MultiSelect, Select, theme::ColorfulTheme};
 
-// ── cross-platform symbols ──
-// Windows cmd.exe with default codepage can't render Unicode glyphs.
-// Modern terminals (Windows Terminal, PowerShell 7, iTerm2, etc.) handle them fine.
-// We fall back to ASCII on Windows to be safe everywhere.
-
 #[cfg(windows)]
 mod sym {
     pub const CHECK: &str = "[ok]";
     pub const SKIP: &str = "[skip]";
     pub const CROSS: &str = "[x]";
     pub const DASH: &str = "--";
+    pub const ARROW_R: &str = "->";
+    pub const BOX_H: &str = "-";
+    pub const BOX_V: &str = "|";
+    pub const BOX_TL: &str = "+";
+    pub const BOX_TR: &str = "+";
+    pub const BOX_BL: &str = "+";
+    pub const BOX_BR: &str = "+";
 }
 
 #[cfg(not(windows))]
 mod sym {
-    pub const CHECK: &str = "\u{2713}";  // ✓
-    pub const SKIP: &str = "\u{2298}";   // ⊘
-    pub const CROSS: &str = "\u{2717}";  // ✗
-    pub const DASH: &str = "\u{2014}";   // —
+    pub const CHECK: &str = "\u{2713}";
+    pub const SKIP: &str = "\u{2298}";
+    pub const CROSS: &str = "\u{2717}";
+    pub const DASH: &str = "\u{2014}";
+    pub const ARROW_R: &str = "\u{2192}";
+    pub const BOX_H: &str = "\u{2500}";
+    pub const BOX_V: &str = "\u{2502}";
+    pub const BOX_TL: &str = "\u{256d}";
+    pub const BOX_TR: &str = "\u{256e}";
+    pub const BOX_BL: &str = "\u{2570}";
+    pub const BOX_BR: &str = "\u{256f}";
 }
 
 #[derive(Parser)]
-#[command(name = "gitport", about = "Port commits between two sibling repos")]
+#[command(
+    name = "gitport",
+    about = "Port commits between two sibling repos",
+    disable_help_subcommand = true
+)]
 struct Cli {
     #[command(subcommand)]
-    cmd: Cmd,
+    cmd: Option<Cmd>,
 }
 
 #[derive(Subcommand)]
@@ -44,21 +57,17 @@ enum Cmd {
     },
     /// Show peer commits not yet ported here
     List {
-        /// Peer branch to compare against (omit to pick interactively)
         #[arg(long, short)]
         branch: Option<String>,
     },
     /// Interactively select and cherry-pick peer commits
     Pick {
-        /// Peer branch to cherry-pick from (omit to pick interactively)
         #[arg(long, short)]
         branch: Option<String>,
     },
     /// Port a commit (select interactively, or pass a SHA directly)
     Port {
-        /// Commit SHA to port (omit to select interactively)
         sha: Option<String>,
-        /// Peer branch to pick from (omit to pick interactively)
         #[arg(long, short)]
         branch: Option<String>,
     },
@@ -70,9 +79,86 @@ enum Cmd {
 
 fn s_green() -> Style { Style::new().green().bold() }
 fn s_yellow() -> Style { Style::new().yellow() }
+fn s_cyan() -> Style { Style::new().cyan().bold() }
 fn s_dim() -> Style { Style::new().dim() }
 fn s_bold() -> Style { Style::new().bold() }
 fn s_red() -> Style { Style::new().red().bold() }
+fn s_white() -> Style { Style::new().white().bold() }
+fn s_magenta() -> Style { Style::new().magenta() }
+
+// ── banner ──
+
+fn print_banner() {
+    let h = sym::BOX_H;
+    let v = sym::BOX_V;
+    let tl = sym::BOX_TL;
+    let tr = sym::BOX_TR;
+    let bl = sym::BOX_BL;
+    let br = sym::BOX_BR;
+    let ar = sym::ARROW_R;
+
+    let w = 50;
+    let border = h.repeat(w);
+
+    println!();
+    println!("  {}{}{}", s_dim().apply_to(tl), s_dim().apply_to(&border), s_dim().apply_to(tr));
+    print_box_line(v, &format!("{}", s_cyan().apply_to("gitport")), 7, w);
+    print_box_line(v, &format!("{}", s_dim().apply_to("Port commits between two sibling repos")), 38, w);
+    println!("  {}{}{}", s_dim().apply_to(bl), s_dim().apply_to(&border), s_dim().apply_to(br));
+    println!();
+    println!("  {}",
+        s_dim().apply_to("Run inside the repo that should RECEIVE commits.")
+    );
+    println!("  {}",
+        s_dim().apply_to("The other repo is the \"peer\" you copy FROM.")
+    );
+    println!();
+
+    print_cmd("init <url> --name <n>", "Link a peer repo (one-time setup)", "1");
+    print_cmd("list", "Show peer commits not yet ported here", "2");
+    print_cmd("pick", "Select multiple commits to port", "3");
+    print_cmd("port", "Select one commit to port", "4");
+    print_cmd("push", "Push current branch to origin", "5");
+
+    println!();
+    println!("  {} {}",
+        s_bold().apply_to("Typical flow:"),
+        s_dim().apply_to(format!(
+            "init {ar} list {ar} pick/port {ar} push"
+        )),
+    );
+    println!();
+    println!("  {}  gitport init https://github.com/org/peer.git --name peer",
+        s_dim().apply_to("$"),
+    );
+    println!("  {}  gitport list",
+        s_dim().apply_to("$"),
+    );
+    println!("  {}  gitport pick",
+        s_dim().apply_to("$"),
+    );
+    println!("  {}  gitport push",
+        s_dim().apply_to("$"),
+    );
+    println!();
+    println!("  {} gitport <command> --help",
+        s_dim().apply_to("Run"),
+    );
+    println!();
+}
+
+fn print_box_line(v: &str, content: &str, content_len: usize, width: usize) {
+    let padding = width - 2 - content_len;
+    println!("  {} {}{}{}", s_dim().apply_to(v), content, " ".repeat(padding), s_dim().apply_to(v));
+}
+
+fn print_cmd(cmd: &str, desc: &str, num: &str) {
+    println!("  {}  {}  {}",
+        s_magenta().apply_to(format!("{num}.")),
+        s_white().apply_to(format!("{:<28}", format!("gitport {cmd}"))),
+        s_dim().apply_to(desc),
+    );
+}
 
 // ── helpers ──
 
@@ -410,19 +496,25 @@ fn push() -> anyhow::Result<()> {
 }
 
 fn main() -> anyhow::Result<()> {
-    // On Windows, initialize the terminal so the console crate enables
-    // ANSI color support (virtual terminal processing).
     #[cfg(windows)]
     let _ = console::Term::stdout();
 
-    check_git_installed()?;
-
     let cli = Cli::parse();
+
     match cli.cmd {
-        Cmd::Init { peer_url, name } => init(&peer_url, &name),
-        Cmd::List { branch } => list(branch),
-        Cmd::Pick { branch } => pick(branch),
-        Cmd::Port { sha, branch } => port(sha, branch),
-        Cmd::Push => push(),
+        None => {
+            print_banner();
+            Ok(())
+        }
+        Some(cmd) => {
+            check_git_installed()?;
+            match cmd {
+                Cmd::Init { peer_url, name } => init(&peer_url, &name),
+                Cmd::List { branch } => list(branch),
+                Cmd::Pick { branch } => pick(branch),
+                Cmd::Port { sha, branch } => port(sha, branch),
+                Cmd::Push => push(),
+            }
+        }
     }
 }
