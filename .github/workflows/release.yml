@@ -18,18 +18,24 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             artifact: gitport-linux-amd64
+            pkg: false
 
           - os: macos-latest
             target: aarch64-apple-darwin
             artifact: gitport-macos-arm64
+            pkg: true
+            pkg_name: gitport-macos-arm64.pkg
 
           - os: macos-latest
             target: x86_64-apple-darwin
             artifact: gitport-macos-amd64
+            pkg: true
+            pkg_name: gitport-macos-amd64.pkg
 
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             artifact: gitport-windows-amd64.exe
+            pkg: false
 
     steps:
       - uses: actions/checkout@v5
@@ -58,11 +64,31 @@ jobs:
         if: runner.os == 'Windows'
         run: copy target\${{ matrix.target }}\release\gitport.exe ${{ matrix.artifact }}
 
-      - name: Upload artifact
+      - name: Create macOS .pkg installer
+        if: matrix.pkg
+        run: |
+          mkdir -p payload/usr/local/bin
+          cp target/${{ matrix.target }}/release/gitport payload/usr/local/bin/gitport
+          chmod +x payload/usr/local/bin/gitport
+          pkgbuild \
+            --root payload \
+            --identifier com.gitport.cli \
+            --version ${{ github.ref_name }} \
+            --install-location / \
+            ${{ matrix.pkg_name }}
+
+      - name: Upload binary
         uses: actions/upload-artifact@v5
         with:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.artifact }}
+
+      - name: Upload pkg
+        if: matrix.pkg
+        uses: actions/upload-artifact@v5
+        with:
+          name: ${{ matrix.pkg_name }}
+          path: ${{ matrix.pkg_name }}
 
   release:
     name: Create Release
@@ -84,8 +110,31 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
+          body: |
+            ## Install
+
+            ### macOS (double-click install)
+            - **Apple Silicon (M1/M2/M3/M4):** Download `gitport-macos-arm64.pkg`
+            - **Intel Mac:** Download `gitport-macos-amd64.pkg`
+
+            Double-click the `.pkg` file → follow the installer → `gitport` is ready in your terminal.
+
+            > If macOS says "unidentified developer", right-click the `.pkg` → click **Open** → click **Open** again.
+
+            ### Linux
+            ```bash
+            curl -L https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/gitport-linux-amd64 -o gitport
+            chmod +x gitport
+            sudo mv gitport /usr/local/bin/
+            ```
+
+            ### Windows
+            Download `gitport-windows-amd64.exe`, rename to `gitport.exe`, and put it in a folder on your PATH.
+
           files: |
             artifacts/gitport-linux-amd64
             artifacts/gitport-macos-arm64
             artifacts/gitport-macos-amd64
+            artifacts/gitport-macos-arm64.pkg
+            artifacts/gitport-macos-amd64.pkg
             artifacts/gitport-windows-amd64.exe
