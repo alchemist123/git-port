@@ -13,12 +13,19 @@ mod sym {
     pub const CROSS: &str = "[x]";
     pub const DASH: &str = "--";
     pub const ARROW_R: &str = "->";
+    pub const ARROW_L: &str = "<-";
     pub const BOX_H: &str = "-";
     pub const BOX_V: &str = "|";
     pub const BOX_TL: &str = "+";
     pub const BOX_TR: &str = "+";
     pub const BOX_BL: &str = "+";
     pub const BOX_BR: &str = "+";
+    pub const TREE_V: &str = "|";
+    pub const TREE_T: &str = "+";
+    pub const TREE_L: &str = "+";
+    pub const DOT: &str = "o";
+    pub const DOT_OPEN: &str = "*";
+    pub const DOT_PORT: &str = "+";
 }
 
 #[cfg(not(windows))]
@@ -28,12 +35,19 @@ mod sym {
     pub const CROSS: &str = "\u{2717}";
     pub const DASH: &str = "\u{2014}";
     pub const ARROW_R: &str = "\u{2192}";
+    pub const ARROW_L: &str = "\u{2190}";
     pub const BOX_H: &str = "\u{2500}";
     pub const BOX_V: &str = "\u{2502}";
     pub const BOX_TL: &str = "\u{256d}";
     pub const BOX_TR: &str = "\u{256e}";
     pub const BOX_BL: &str = "\u{2570}";
     pub const BOX_BR: &str = "\u{256f}";
+    pub const TREE_V: &str = "\u{2502}";
+    pub const TREE_T: &str = "\u{251c}";
+    pub const TREE_L: &str = "\u{2514}";
+    pub const DOT: &str = "\u{25cf}";
+    pub const DOT_OPEN: &str = "\u{25cb}";
+    pub const DOT_PORT: &str = "\u{25c8}";
 }
 
 #[derive(Parser)]
@@ -68,6 +82,16 @@ enum Cmd {
     /// Port a commit (select interactively, or pass a SHA directly)
     Port {
         sha: Option<String>,
+        #[arg(long, short)]
+        branch: Option<String>,
+    },
+    /// Visual commit tree: local, ported, and peer commits
+    Log {
+        #[arg(long, short)]
+        branch: Option<String>,
+    },
+    /// Quick dashboard: branch state and sync summary
+    Status {
         #[arg(long, short)]
         branch: Option<String>,
     },
@@ -115,10 +139,12 @@ fn print_banner() {
     println!();
 
     print_cmd("init <url> --name <n>", "Link a peer repo (one-time setup)", "1");
-    print_cmd("list", "Show peer commits not yet ported here", "2");
-    print_cmd("pick", "Select multiple commits to port", "3");
-    print_cmd("port", "Select one commit to port", "4");
-    print_cmd("push", "Push current branch to origin", "5");
+    print_cmd("log", "Visual commit tree with sync status", "2");
+    print_cmd("status", "Quick sync dashboard", "3");
+    print_cmd("list", "Show peer commits not yet ported here", "4");
+    print_cmd("pick", "Select multiple commits to port", "5");
+    print_cmd("port", "Select one commit to port", "6");
+    print_cmd("push", "Push current branch to origin", "7");
 
     println!();
     println!("  {} {}",
@@ -487,6 +513,315 @@ fn commit_subject(sha: &str) -> anyhow::Result<String> {
     git::git(&["log", "-1", "--format=%s", sha])
 }
 
+struct LogCommit {
+    sha: String,
+    subject: String,
+    date: String,
+}
+
+fn get_commits_with_details(rev_range: &str) -> anyhow::Result<Vec<LogCommit>> {
+    let output = git::git(&["log", "--format=%H|%s|%cr", rev_range]);
+    let text = match output {
+        Ok(t) => t,
+        Err(_) => return Ok(vec![]),
+    };
+    if text.is_empty() {
+        return Ok(vec![]);
+    }
+    Ok(text
+        .lines()
+        .filter_map(|line| {
+            let parts: Vec<&str> = line.splitn(3, '|').collect();
+            if parts.len() == 3 {
+                Some(LogCommit {
+                    sha: parts[0].to_string(),
+                    subject: parts[1].to_string(),
+                    date: parts[2].to_string(),
+                })
+            } else {
+                None
+            }
+        })
+        .collect())
+}
+
+fn is_cherry_picked(sha: &str) -> bool {
+    git::git(&["log", "-1", "--format=%b", sha])
+        .map(|body| body.contains("(cherry picked from commit"))
+        .unwrap_or(false)
+}
+
+fn log_cmd(branch_flag: Option<String>) -> anyhow::Result<()> {
+    let p = peer()?;
+    let b = current_branch()?;
+    let remote_branch = resolve_peer_branch(branch_flag)?;
+
+    if !git::git_live(&["fetch", &p])? {
+        anyhow::bail!("git fetch {p} failed");
+    }
+
+    let merge_base = git::git(&["merge-base", &b, &remote_branch]).unwrap_or_default();
+    let merge_base_short = if merge_base.len() >= 7 { &merge_base[..7] } else { &merge_base };
+
+    // Peer commits: available vs already ported
+    let cherry_output = git::git(&["cherry", "-v", &b, &remote_branch]).unwrap_or_default();
+    let mut available: Vec<LogCommit> = Vec::new();
+
+    for line in cherry_output.lines() {
+        if let Some(rest) = line.strip_prefix("+ ")
+            && let Some((sha, _)) = rest.split_once(' ')
+            && let Ok(commits) = get_commits_with_details(&format!("-1 {sha}"))
+            && let Some(c) = commits.into_iter().next()
+        {
+            available.push(c);
+        }
+    }
+
+    // Local commits: ported (cherry-picked) vs your own
+    let local_range = if merge_base.is_empty() {
+        b.clone()
+    } else {
+        format!("{merge_base}..{b}")
+    };
+    let local_all = get_commits_with_details(&local_range)?;
+
+    let mut ported: Vec<LogCommit> = Vec::new();
+    let mut local_only: Vec<LogCommit> = Vec::new();
+    for c in local_all {
+        if is_cherry_picked(&c.sha) {
+            ported.push(c);
+        } else {
+            local_only.push(c);
+        }
+    }
+
+    // Header
+    let tv = sym::TREE_V;
+    let tt = sym::TREE_T;
+    let tl = sym::TREE_L;
+    let al = sym::ARROW_L;
+
+    println!();
+    println!("  {} {} {} {}",
+        s_cyan().apply_to(&b),
+        s_dim().apply_to(al),
+        s_yellow().apply_to(&remote_branch),
+        s_dim().apply_to(format!("(peer: {p})")),
+    );
+    println!();
+
+    // Section: Available to port
+    if !available.is_empty() {
+        println!("  {}  {} {}",
+            s_yellow().apply_to(tt),
+            s_yellow().apply_to(format!("Available to port ({})", available.len())),
+            s_dim().apply_to(format!("from {remote_branch}")),
+        );
+        for c in &available {
+            println!("  {}  {}  {}  {}  {}",
+                s_yellow().apply_to(tv),
+                s_yellow().apply_to(sym::DOT_OPEN),
+                s_yellow().apply_to(&c.sha[..7]),
+                c.subject,
+                s_dim().apply_to(&c.date),
+            );
+        }
+        println!("  {}", s_yellow().apply_to(tv));
+    }
+
+    // Section: Ported
+    if !ported.is_empty() {
+        println!("  {}  {} {}",
+            s_green().apply_to(tt),
+            s_green().apply_to(format!("Ported ({})", ported.len())),
+            s_dim().apply_to("cherry-picked from peer"),
+        );
+        for c in &ported {
+            println!("  {}  {}  {}  {}  {}",
+                s_green().apply_to(tv),
+                s_green().apply_to(sym::DOT_PORT),
+                s_green().apply_to(&c.sha[..7]),
+                c.subject,
+                s_dim().apply_to(&c.date),
+            );
+        }
+        println!("  {}", s_green().apply_to(tv));
+    }
+
+    // Section: Local commits
+    if !local_only.is_empty() {
+        println!("  {}  {} {}",
+            s_cyan().apply_to(tt),
+            s_cyan().apply_to(format!("Local ({})", local_only.len())),
+            s_dim().apply_to("your commits, not in peer"),
+        );
+        for c in &local_only {
+            println!("  {}  {}  {}  {}  {}",
+                s_cyan().apply_to(tv),
+                s_cyan().apply_to(sym::DOT),
+                s_cyan().apply_to(&c.sha[..7]),
+                c.subject,
+                s_dim().apply_to(&c.date),
+            );
+        }
+        println!("  {}", s_cyan().apply_to(tv));
+    }
+
+    // Section: Shared base
+    if !merge_base.is_empty() {
+        let base_subject = git::git(&["log", "-1", "--format=%s", &merge_base]).unwrap_or_default();
+        let base_date = git::git(&["log", "-1", "--format=%cr", &merge_base]).unwrap_or_default();
+        println!("  {}  {} {}",
+            s_dim().apply_to(tl),
+            s_dim().apply_to("Shared base"),
+            s_dim().apply_to("common ancestor"),
+        );
+        println!("     {}  {}  {}  {}",
+            s_dim().apply_to(sym::DOT),
+            s_dim().apply_to(merge_base_short),
+            s_dim().apply_to(&base_subject),
+            s_dim().apply_to(&base_date),
+        );
+    }
+
+    // Summary
+    println!();
+    let mut parts: Vec<String> = Vec::new();
+    if !available.is_empty() {
+        parts.push(format!("{} {}", s_yellow().apply_to(format!("{}", available.len())), "to port"));
+    }
+    if !ported.is_empty() {
+        parts.push(format!("{} {}", s_green().apply_to(format!("{}", ported.len())), "ported"));
+    }
+    if !local_only.is_empty() {
+        parts.push(format!("{} {}", s_cyan().apply_to(format!("{}", local_only.len())), "local"));
+    }
+    if parts.is_empty() {
+        println!("  {}", s_green().apply_to("Fully synced!"));
+    } else {
+        println!("  {}", parts.join(&format!("  {}  ", s_dim().apply_to(sym::DOT))));
+    }
+    println!();
+
+    Ok(())
+}
+
+fn status_cmd(branch_flag: Option<String>) -> anyhow::Result<()> {
+    let p = peer()?;
+    let b = current_branch()?;
+    let remote_branch = resolve_peer_branch(branch_flag)?;
+
+    if !git::git_live(&["fetch", &p])? {
+        anyhow::bail!("git fetch {p} failed");
+    }
+
+    let merge_base = git::git(&["merge-base", &b, &remote_branch]).unwrap_or_default();
+
+    // Count available
+    let cherry_output = git::git(&["cherry", "-v", &b, &remote_branch]).unwrap_or_default();
+    let available_count = cherry_output.lines().filter(|l| l.starts_with("+ ")).count();
+    let _peer_ported_count = cherry_output.lines().filter(|l| l.starts_with("- ")).count();
+
+    // Count local
+    let local_range = if merge_base.is_empty() { b.clone() } else { format!("{merge_base}..{b}") };
+    let local_all = get_commits_with_details(&local_range)?;
+    let ported_count = local_all.iter().filter(|c| is_cherry_picked(&c.sha)).count();
+    let local_count = local_all.len() - ported_count;
+
+    // Push status
+    let push_status = if git::git(&["config", &format!("branch.{b}.remote")]).is_ok() {
+        let ahead = git::git(&["rev-list", "--count", &format!("origin/{b}..{b}")]).unwrap_or_default();
+        let ahead_n: usize = ahead.trim().parse().unwrap_or(0);
+        if ahead_n > 0 {
+            format!("{} commit(s) ahead of origin -- run `gitport push`", ahead_n)
+        } else {
+            "up to date with origin".to_string()
+        }
+    } else {
+        "no upstream set".to_string()
+    };
+
+    // Display
+    let h = sym::BOX_H;
+    let tl = sym::BOX_TL;
+    let tr = sym::BOX_TR;
+    let bl = sym::BOX_BL;
+    let br = sym::BOX_BR;
+    let v = sym::BOX_V;
+
+    let w = 52;
+    let border = h.repeat(w);
+
+    println!();
+    println!("  {}{}{}", s_dim().apply_to(tl), s_dim().apply_to(&border), s_dim().apply_to(tr));
+
+    let header_len = b.len() + 3 + remote_branch.len();
+    print_box_line(v, &format!("{} {} {}",
+        s_cyan().apply_to(&b),
+        s_dim().apply_to(sym::ARROW_L),
+        s_yellow().apply_to(&remote_branch),
+    ), header_len, w);
+
+    println!("  {}{}{}", s_dim().apply_to(bl), s_dim().apply_to(&border), s_dim().apply_to(br));
+    println!();
+
+    // Sync stats
+    println!("  {}  {}  {}",
+        s_yellow().apply_to(sym::DOT_OPEN),
+        s_yellow().apply_to(format!("{:<4}", available_count)),
+        if available_count > 0 {
+            s_yellow().apply_to("commit(s) available to port".to_string())
+        } else {
+            s_green().apply_to("commit(s) available to port".to_string())
+        },
+    );
+
+    println!("  {}  {}  {}",
+        s_green().apply_to(sym::DOT_PORT),
+        s_green().apply_to(format!("{:<4}", ported_count)),
+        s_dim().apply_to("commit(s) ported from peer"),
+    );
+
+    println!("  {}  {}  {}",
+        s_cyan().apply_to(sym::DOT),
+        s_cyan().apply_to(format!("{:<4}", local_count)),
+        s_dim().apply_to("local commit(s)"),
+    );
+
+    println!();
+
+    // Push status
+    if push_status.contains("ahead") {
+        println!("  {} {}",
+            s_yellow().apply_to(sym::ARROW_R),
+            s_yellow().apply_to(&push_status),
+        );
+    } else {
+        println!("  {} {}",
+            s_green().apply_to(sym::CHECK),
+            s_dim().apply_to(&push_status),
+        );
+    }
+
+    // Next action hint
+    println!();
+    if available_count > 0 {
+        println!("  {} Run {} or {} to port commits",
+            s_dim().apply_to("Hint:"),
+            s_white().apply_to("gitport pick"),
+            s_white().apply_to("gitport port"),
+        );
+    } else if push_status.contains("ahead") {
+        println!("  {} Run {} to push your changes",
+            s_dim().apply_to("Hint:"),
+            s_white().apply_to("gitport push"),
+        );
+    }
+    println!();
+
+    Ok(())
+}
+
 fn push() -> anyhow::Result<()> {
     let branch = current_branch()?;
     if !git::git_live(&["push", "origin", &branch])? {
@@ -510,6 +845,8 @@ fn main() -> anyhow::Result<()> {
             check_git_installed()?;
             match cmd {
                 Cmd::Init { peer_url, name } => init(&peer_url, &name),
+                Cmd::Log { branch } => log_cmd(branch),
+                Cmd::Status { branch } => status_cmd(branch),
                 Cmd::List { branch } => list(branch),
                 Cmd::Pick { branch } => pick(branch),
                 Cmd::Port { sha, branch } => port(sha, branch),
